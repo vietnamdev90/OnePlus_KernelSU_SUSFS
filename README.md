@@ -86,6 +86,14 @@ Flashing this kernel will not void your warranty, but there is always a risk of 
 
 ---
 
+## ⚙️ Custom kernel.config
+
+This fork expects a `kernel.config` file in the repository root. During the build it first generates the normal `gki_defconfig`, applies the workflow's generated options, then merges `kernel.config` into `kernel_platform/common/out/.config` and runs `olddefconfig`. The resolved config is also copied to `kernel_platform/common/.config` for inspection.
+
+The build uses `O=out`, so `kernel_platform/common/out/.config` is the configuration that actually controls compilation.
+
+---
+
 ## 📋 Installation Instructions
 
 For GKI installation, please follow the official guide:

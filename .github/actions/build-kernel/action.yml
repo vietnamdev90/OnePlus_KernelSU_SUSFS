@@ -27,6 +27,11 @@ inputs:
     required: false
     type: string
     default: ''
+  kernel_config_path:
+    description: 'Path to kernel.config, relative to the repository root unless absolute'
+    required: false
+    type: string
+    default: 'kernel.config'
   optimize_level:
     description: 'Compiler optimization level (O2 or O3)'
     required: false
@@ -1603,9 +1608,63 @@ runs:
             exit 1
             ;;
         esac
-        
-        
+
+        # Apply user kernel.config LAST so it becomes the final config override.
+        # The actual build uses O=out, therefore out/.config (not common/.config)
+        # is the Kconfig file consumed by make.
+        KERNEL_CONFIG_INPUT="${{ inputs.kernel_config_path }}"
+        KERNEL_CONFIG_FILE=""
+
+        if [[ "$KERNEL_CONFIG_INPUT" = /* ]]; then
+          if [ -f "$KERNEL_CONFIG_INPUT" ]; then
+            KERNEL_CONFIG_FILE="$KERNEL_CONFIG_INPUT"
+          fi
+        else
+          for candidate in \
+            "$GITHUB_WORKSPACE/$KERNEL_CONFIG_INPUT" \
+            "$GITHUB_WORKSPACE/action-source/$KERNEL_CONFIG_INPUT" \
+            "$CONFIG_FOLDER/$KERNEL_CONFIG_INPUT" \
+            "$COMMON_KERNEL_FOLDER/$KERNEL_CONFIG_INPUT"; do
+            if [ -f "$candidate" ]; then
+              KERNEL_CONFIG_FILE="$candidate"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$KERNEL_CONFIG_FILE" ]; then
+          echo "::error::kernel.config not found. Expected '${KERNEL_CONFIG_INPUT}' in repository root (recommended) or kernel source tree."
+          exit 1
+        fi
+
+        if [ ! -f scripts/kconfig/merge_config.sh ]; then
+          echo "::error::scripts/kconfig/merge_config.sh not found in $COMMON_KERNEL_FOLDER"
+          exit 1
+        fi
+
+        echo "============================================"
+        echo "🧩 Applying kernel.config to build .config"
+        echo "Source: $KERNEL_CONFIG_FILE"
+        echo "Target: $COMMON_KERNEL_FOLDER/$OUT/.config"
+        echo "============================================"
+
+        BASE_CONFIG="$OUT/.config.before-kernel-config"
+        cp -f "$OUT/.config" "$BASE_CONFIG"
+        (
+          cd "$OUT"
+          bash "$COMMON_KERNEL_FOLDER/scripts/kconfig/merge_config.sh" -m \
+            "$COMMON_KERNEL_FOLDER/$BASE_CONFIG" \
+            "$KERNEL_CONFIG_FILE"
+        )
+        rm -f "$BASE_CONFIG"
+
+        # Resolve dependencies/defaults after the fragment/full config was merged.
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
+
+        # Keep a mirror at common/.config for inspection/debugging. The build itself
+        # still consumes out/.config because O=out is used for every make invocation.
+        cp -f "$OUT/.config" "$COMMON_KERNEL_FOLDER/.config"
+        echo "✅ kernel.config applied; final build config: $COMMON_KERNEL_FOLDER/$OUT/.config"
         
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
