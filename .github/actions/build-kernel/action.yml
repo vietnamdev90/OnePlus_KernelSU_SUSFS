@@ -1339,6 +1339,19 @@ runs:
         echo "✅ Droidspaces Support applied"
         echo "::endgroup::"
 
+    - name: Add kernel patch
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Add patch performance"
+        cp "$GITHUB_WORKSPACE/0001-sm8850-performance-keepalive.patch" "$COMMON_KERNEL_FOLDER"
+        cp "$GITHUB_WORKSPACE/0002-oneplus-sm8850-aggressive-performance.patch" "$COMMON_KERNEL_FOLDER"
+        cd "$COMMON_KERNEL_FOLDER"
+        patch -p1 < 0001-sm8850-performance-keepalive.patch
+        patch -p1 < 0002-oneplus-sm8850-aggressive-performance.patch
+        rm -rf 0001-sm8850-performance-keepalive.patch
+        rm -rf 0002-oneplus-sm8850-aggressive-performance.patch
+        
     - name: Add Build based configs
       shell: bash
       run: |
