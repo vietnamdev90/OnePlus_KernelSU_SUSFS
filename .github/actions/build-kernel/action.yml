@@ -5,23 +5,6 @@ inputs:
     description: 'JSON string containing full device config'
     required: true
     type: string
-  ksu_type:
-    description: 'Select KSU Type'
-    required: true
-    type: choice
-    options:
-      - KSUN
-      - KSU
-  ksu_branch_or_hash:
-    description: 'KSU branch or commit hash (empty = auto-detect by ksu_type)'
-    required: false
-    type: string
-    default: ""
-  susfs_commit_hash_or_branch:
-    description: 'SUSFS branch or commit hash (empty = auto-detect by kernel version)'
-    required: false
-    type: string
-    default: ""
   build_timestamp:
     description: 'Custom kernel build timestamp shown in uname -a (e.g. "Tue Feb 10 10:01:02 UTC 2026"). Leave empty to use the current build time.'
     required: false
@@ -55,15 +38,6 @@ outputs:
   kernel_version:
     description: 'Full kernel version string'
     value: ${{ steps.save_metadata.outputs.kernel_version }}
-  ksu_version:
-    description: 'KernelSU version number'
-    value: ${{ steps.save_metadata.outputs.ksu_version }}
-  ksu_type:
-    description: 'KernelSU Variant'
-    value: ${{ steps.save_metadata.outputs.ksu_type }}
-  susfs_version:
-    description: 'SUSFS version string'
-    value: ${{ steps.save_metadata.outputs.susfs_version }}
   build_timestamp:
     description: 'Effective kernel build timestamp used in uname -a'
     value: ${{ steps.save_metadata.outputs.build_timestamp }}
@@ -214,12 +188,6 @@ runs:
           errors+=("Input 'hmbird' contains invalid characters. Allowed: 'true' or 'false'. Got: '$hmbird'")
         fi
         
-        if [[ -z "$susfs" ]]; then
-          errors+=("Input 'susfs' cannot be empty")
-        elif [[ "$susfs" != "true" && "$susfs" != "false" ]]; then
-          errors+=("Input 'susfs' contains invalid characters. Allowed: 'true' or 'false'. Got: '$susfs'")
-        fi
-        
         if [[ -z "$opt" ]]; then
           errors+=("Input 'opt' cannot be empty")
         elif [[ "$opt" != "true" && "$opt" != "false" ]]; then
@@ -363,9 +331,6 @@ runs:
         AK3_DIR="$CONFIG_DIR/AnyKernel3"
         DEBUG_ARTIFACTS_DIR="$GITHUB_WORKSPACE/debug_artifacts"
         KERNEL_PATCHES_DIR="$GITHUB_WORKSPACE/kernel_patches"
-        SUSFS_DIR="$GITHUB_WORKSPACE/susfs4ksu"
-        KSU_DIR="$KERNEL_PLATFORM_DIR/KernelSU"
-        KSUN_DIR="$KERNEL_PLATFORM_DIR/KernelSU-Next"
         mkdir -p "$ARTIFACTS_DIR"
         mkdir -p "$DEBUG_ARTIFACTS_DIR"
         
@@ -378,9 +343,6 @@ runs:
         echo "AK3_FOLDER=$AK3_DIR" >> "$GITHUB_ENV"
         echo "DEBUG_ARTIFACTS_FOLDER=$DEBUG_ARTIFACTS_DIR" >> "$GITHUB_ENV"
         echo "KERNEL_PATCHES_FOLDER=$KERNEL_PATCHES_DIR" >> "$GITHUB_ENV"
-        echo "SUSFS_FOLDER=$SUSFS_DIR" >> "$GITHUB_ENV"
-        echo "KSU_FOLDER=$KSU_DIR" >> "$GITHUB_ENV"
-        echo "KSUN_FOLDER=$KSUN_DIR" >> "$GITHUB_ENV"
         
         DEBUG_ZIP_NAME="debug_${OP_MODEL}_${OP_OS_VERSION}.zip"
         echo "DEBUG_ZIP_NAME=$DEBUG_ZIP_NAME" >> "$GITHUB_ENV"
@@ -435,15 +397,8 @@ runs:
           echo "KERNEL_VER=$VERSION.$PATCHLEVEL"
           echo "TKERNEL_VER=$FULL_VERSION"
           echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION"
-          if [ "${{ env.OP_SUSFS }}" = true ]; then
-            echo "SUSFS_KERNEL_BRANCH=gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL"
-          fi
         } >> "$GITHUB_ENV"
         
-        echo "✅ Detected: $ANDROID_VERSION-$FULL_VERSION"
-        if [ "${{ env.OP_SUSFS }}" = true ]; then
-          echo "   SUSFS Branch: gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL"
-        fi
         echo "::endgroup::"
 
     - name: 🏷️ Set Build Identity (Hardcoded)
@@ -746,32 +701,6 @@ runs:
         rm -f common/android/abi_gki_protected_exports_* || true
         sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl || true
         echo "::endgroup::"
-
-
-    - name: Add BBG
-      if: ${{ env.OP_BBG == 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Add BBG LSM"
-        cd "$KERNEL_PLATFORM_FOLDER"
-        echo "Adding BBG..."
-        if ! wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash -s main; then
-          echo "::warning::BBG setup script failed, continuing anyway"
-        fi
-        echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
-        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
-        
-        case "$OP_BRANCH" in
-          wild/sm8850|wild/sm8845)
-            echo "Applying BBG efisp abl whitelist patch"
-            patch -p1 < "$KERNEL_PATCHES_FOLDER/common/bbg/0001-Enable-abl-and-efisp-flashing-for-efisp-exploit-devices.patch"
-          ;;
-        esac
-        
-        echo "✅ BBG LSM added"
-        echo "::endgroup::"
-
 
     - name: Apply Other Patches
       shell: bash
