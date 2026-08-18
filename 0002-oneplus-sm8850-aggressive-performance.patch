@@ -1,0 +1,338 @@
+From 1ca64cea3da0d3121a37b47801f3bd87451312e7 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 9 Aug 2026 23:26:24 +0600
+Subject: [PATCH] ANDROID: add aggressive performance profile for arm64 GKI
+
+Add a compile-time Android profile for latency-first custom kernels.
+Raise schedutil DVFS headroom and I/O wake boost, cap its initial
+transition rate limit, and install zram-oriented reclaim defaults.
+
+Add a separate emergency-only generic thermal mode. It bypasses
+active/passive governor actions while preserving HOT/CRITICAL handling
+and emergency poweroff. Firmware, hardware, vendor drivers, and directly
+polling thermal services remain outside this bypass.
+
+Enable the profile in arm64 gki_defconfig together with a 1000 Hz tick,
+non-lazy RCU callbacks, LZ4 zram, and optional zram writeback support.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ .../android-aggressive-performance.rst        | 56 +++++++++++++++++++
+ Documentation/admin-guide/index.rst           |  1 +
+ arch/arm64/configs/gki_defconfig              |  6 +-
+ drivers/android/Kconfig                       | 28 ++++++++++
+ drivers/android/Makefile                      |  1 +
+ drivers/android/performance_profile.c         | 45 +++++++++++++++
+ drivers/thermal/thermal_core.c                | 21 ++++++-
+ include/linux/sched/cpufreq.h                 |  5 ++
+ kernel/sched/cpufreq_schedutil.c              |  9 +++
+ 9 files changed, 168 insertions(+), 4 deletions(-)
+ create mode 100644 Documentation/admin-guide/android-aggressive-performance.rst
+ create mode 100644 drivers/android/performance_profile.c
+
+diff --git a/Documentation/admin-guide/android-aggressive-performance.rst b/Documentation/admin-guide/android-aggressive-performance.rst
+new file mode 100644
+index 0000000..86fe115
+--- /dev/null
++++ b/Documentation/admin-guide/android-aggressive-performance.rst
+@@ -0,0 +1,56 @@
++.. SPDX-License-Identifier: GPL-2.0-only
++
++======================================
++Android aggressive performance profile
++======================================
++
++Scope
++=====
++
++``CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE`` is a latency-first profile for a
++custom Android kernel.  It changes common-kernel policy only; it cannot remove
++limits implemented in a Qualcomm/OEM vendor module, device tree, firmware,
++PMIC, Android thermal HAL, ``lmkd``, ActivityManager, or an OEM process manager.
++
++The profile:
++
++* increases schedutil DVFS headroom from 25 percent to 50 percent;
++* caps schedutil's initial rate limit at 500 microseconds;
++* starts I/O-wakeup boosting at 25 percent of CPU capacity;
++* selects a 1000 Hz scheduler tick and disables lazy RCU callbacks in the
++  supplied arm64 GKI defconfig;
++* defaults zram to LZ4 and enables optional zram writeback support; and
++* initializes ``vm.swappiness=160``, ``vm.page-cluster=0``,
++  ``vm.watermark_scale_factor=20``, and ``vm.vfs_cache_pressure=150``.
++
++The VM values remain normal writable sysctls.  Android init can override them.
++
++Thermal emergency-only mode
++===========================
++
++``CONFIG_ANDROID_THERMAL_EMERGENCY_ONLY`` suppresses generic ACTIVE and PASSIVE
++trip notifications and bypasses the generic thermal governor.  HOT and CRITICAL
++trips and the emergency shutdown path are preserved.  Hardware and firmware
++limits remain outside the kernel thermal governor and can still reduce clocks.
++
++This option is hazardous.  It can overheat the phone, shorten battery life,
++force shutdowns, or damage hardware.  Keep a known-good boot image and use
++external cooling.  Disable this option for daily use or any unattended device.
++
++Background applications
++=======================
++
++The zram and reclaim defaults reduce direct-reclaim stalls and give cold
++anonymous memory more opportunity to remain compressed.  They do not prevent a
++userspace component from sending ``SIGKILL``.  Keeping selected applications
++alive also requires device-specific changes to ``lmkd`` thresholds,
++ActivityManager cached-process limits, battery restrictions, and any OPlus
++process manager.  Those components are not present in Android Common Kernel.
++
++Validation
++==========
++
++Compare sustained performance, frame-time percentiles, zram occupancy, PSI
++memory stalls, temperature, and forced-shutdown behavior against a stock boot
++image.  A short benchmark is not sufficient because the aggressive profile can
++reach the thermal ceiling sooner than the stock policy.
+diff --git a/Documentation/admin-guide/index.rst b/Documentation/admin-guide/index.rst
+index e85b1ad..f4573ea 100644
+--- a/Documentation/admin-guide/index.rst
++++ b/Documentation/admin-guide/index.rst
+@@ -76,6 +76,7 @@ configure specific aspects of kernel behavior to your liking.
+    :maxdepth: 1
+ 
+    acpi/index
++   android-aggressive-performance
+    aoe/index
+    auxdisplay/index
+    bcache
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index 85b7d97..81fb978 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -3,6 +3,7 @@ CONFIG_AUDIT=y
+ CONFIG_TIME_KUNIT_TEST=m
+ CONFIG_NO_HZ=y
+ CONFIG_HIGH_RES_TIMERS=y
++CONFIG_HZ_1000=y
+ CONFIG_BPF_SYSCALL=y
+ CONFIG_BPF_JIT=y
+ CONFIG_BPF_JIT_ALWAYS_ON=y
+@@ -20,7 +21,6 @@ CONFIG_RCU_EXPERT=y
+ CONFIG_RCU_BOOST=y
+ CONFIG_RCU_NOCB_CPU=y
+ CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y
+-CONFIG_RCU_LAZY=y
+ CONFIG_IKCONFIG=y
+ CONFIG_IKCONFIG_PROC=y
+ CONFIG_IKHEADERS=m
+@@ -334,6 +334,8 @@ CONFIG_GNSS=m
+ CONFIG_ZRAM=m
+ CONFIG_ZRAM_BACKEND_LZ4=y
+ CONFIG_ZRAM_BACKEND_LZO=y
++CONFIG_ZRAM_DEF_COMP_LZ4=y
++CONFIG_ZRAM_WRITEBACK=y
+ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_LOOP_MIN_COUNT=16
+ CONFIG_BLK_DEV_RAM=y
+@@ -653,6 +655,8 @@ CONFIG_ANDROID_BINDER_IPC=y
+ CONFIG_ANDROID_BINDERFS=y
+ CONFIG_ANDROID_BINDER_IPC_RUST=m
+ CONFIG_ANDROID_VENDOR_HOOKS=y
++CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE=y
++CONFIG_ANDROID_THERMAL_EMERGENCY_ONLY=y
+ CONFIG_ANDROID_DEBUG_KINFO=y
+ CONFIG_LIBNVDIMM=y
+ CONFIG_INTERCONNECT=y
+diff --git a/drivers/android/Kconfig b/drivers/android/Kconfig
+index 4f8b32f..639dc8e 100644
+--- a/drivers/android/Kconfig
++++ b/drivers/android/Kconfig
+@@ -77,6 +77,34 @@ config ANDROID_VENDOR_HOOKS
+ 	  Allow vendor modules to attach to tracepoint "hooks" defined via
+ 	  DECLARE_HOOK or DECLARE_RESTRICTED_HOOK.
+ 
++config ANDROID_AGGRESSIVE_PERFORMANCE
++	bool "Aggressive Android performance profile"
++	depends on CPU_FREQ
++	help
++	  Select a latency-first profile intended for high-performance Android
++	  devices with fast zram.  It gives schedutil more DVFS headroom, reduces
++	  its default rate limit, raises the initial I/O-wakeup boost, and installs
++	  zram-oriented VM defaults during late boot.
++
++	  The VM defaults are deliberately writable: Android init or a tuning
++	  service can still replace them through the normal sysctl interfaces.
++	  This option increases power use and heat and can reduce battery life.
++
++config ANDROID_THERMAL_EMERGENCY_ONLY
++	bool "Ignore non-emergency generic thermal trips"
++	depends on ANDROID_AGGRESSIVE_PERFORMANCE && THERMAL
++	help
++	  Prevent the generic thermal governor and generic active/passive trip
++	  notifications from applying performance caps.  HOT and CRITICAL trips,
++	  including the emergency poweroff path, remain active.
++
++	  This does not bypass limits imposed by firmware, PMIC hardware, vendor
++	  drivers, or an Android thermal service which polls sensors directly.
++
++	  WARNING: This can cause severe overheating, forced shutdowns, premature
++	  battery ageing, or permanent hardware damage.  Enable only on hardware
++	  with adequate external cooling and retain a known-good boot image.
++
+ config ANDROID_DEBUG_KINFO
+ 	bool "Android Debug Kernel Information Support"
+ 	depends on KALLSYMS
+diff --git a/drivers/android/Makefile b/drivers/android/Makefile
+index 5d61953..9e99195 100644
+--- a/drivers/android/Makefile
++++ b/drivers/android/Makefile
+@@ -5,6 +5,7 @@ obj-$(CONFIG_ANDROID_BINDERFS)		+= binderfs.o
+ obj-$(CONFIG_ANDROID_BINDER_IPC)	+= binder.o binder_alloc.o
+ obj-$(CONFIG_ANDROID_BINDER_IPC_SELFTEST) += binder_alloc_selftest.o
+ obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
++obj-$(CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE) += performance_profile.o
+ obj-$(CONFIG_ANDROID_DEBUG_KINFO)	+= debug_kinfo.o
+ 
+ obj-$(CONFIG_ANDROID_BINDER_IPC_RUST)	+= rust_binder.o
+diff --git a/drivers/android/performance_profile.c b/drivers/android/performance_profile.c
+new file mode 100644
+index 0000000..74e9158
+--- /dev/null
++++ b/drivers/android/performance_profile.c
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Latency-first defaults for performance-oriented Android kernels.
++ *
++ * Android init remains free to override every value through sysctl.  This is
++ * intentional: the profile supplies useful early defaults without creating a
++ * second, hidden policy layer which fights userspace.
++ */
++
++#include <linux/dcache.h>
++#include <linux/gfp.h>
++#include <linux/init.h>
++#include <linux/mm.h>
++#include <linux/printk.h>
++#include <linux/swap.h>
++
++#define ANDROID_PERF_WMARK_SCALE_FACTOR	20
++#define ANDROID_PERF_SWAPPINESS		160
++#define ANDROID_PERF_VFS_CACHE_PRESSURE	150
++
++static int __init android_performance_profile_init(void)
++{
++	int ret;
++
++	/*
++	 * Android normally swaps to compressed RAM.  Prefer compressing cold
++	 * anonymous pages over reclaiming a foreground app's file working set,
++	 * and wake kswapd early enough to avoid direct-reclaim stalls.
++	 */
++	ret = set_reclaim_params(ANDROID_PERF_WMARK_SCALE_FACTOR,
++				 ANDROID_PERF_SWAPPINESS);
++	if (ret)
++		pr_warn("android-perf: failed to set reclaim defaults: %d\n", ret);
++
++	/* Random zram reads do not benefit from block-device read-ahead. */
++	WRITE_ONCE(page_cluster, 0);
++
++	/* Reclaim cheap inode/dentry metadata before long-lived app memory. */
++	WRITE_ONCE(sysctl_vfs_cache_pressure,
++		   ANDROID_PERF_VFS_CACHE_PRESSURE);
++
++	pr_info("android-perf: aggressive VM profile enabled\n");
++	return 0;
++}
++late_initcall(android_performance_profile_init);
+diff --git a/drivers/thermal/thermal_core.c b/drivers/thermal/thermal_core.c
+index 3930019..7eb5e6e 100644
+--- a/drivers/thermal/thermal_core.c
++++ b/drivers/thermal/thermal_core.c
+@@ -535,6 +535,12 @@ static void thermal_trip_crossed(struct thermal_zone_device *tz,
+ 	thermal_governor_trip_crossed(governor, tz, trip, crossed_up);
+ }
+ 
++static bool thermal_trip_is_emergency(const struct thermal_trip *trip)
++{
++	return trip->type == THERMAL_TRIP_HOT ||
++	       trip->type == THERMAL_TRIP_CRITICAL;
++}
++
+ static int thermal_trip_notify_cmp(void *not_used, const struct list_head *a,
+ 				   const struct list_head *b)
+ {
+@@ -598,14 +604,23 @@ void __thermal_zone_device_update(struct thermal_zone_device *tz,
+ 	thermal_zone_set_trips(tz, low, high);
+ 
+ 	list_sort(NULL, &way_up_list, thermal_trip_notify_cmp);
+-	list_for_each_entry(td, &way_up_list, notify_list_node)
++	list_for_each_entry(td, &way_up_list, notify_list_node) {
++		if (IS_ENABLED(CONFIG_ANDROID_THERMAL_EMERGENCY_ONLY) &&
++		    !thermal_trip_is_emergency(&td->trip))
++			continue;
+ 		thermal_trip_crossed(tz, &td->trip, governor, true);
++	}
+ 
+ 	list_sort(NULL, &way_down_list, thermal_trip_notify_cmp);
+-	list_for_each_entry_reverse(td, &way_down_list, notify_list_node)
++	list_for_each_entry_reverse(td, &way_down_list, notify_list_node) {
++		if (IS_ENABLED(CONFIG_ANDROID_THERMAL_EMERGENCY_ONLY) &&
++		    !thermal_trip_is_emergency(&td->trip))
++			continue;
+ 		thermal_trip_crossed(tz, &td->trip, governor, false);
++	}
+ 
+-	if (governor->manage)
++	if (!IS_ENABLED(CONFIG_ANDROID_THERMAL_EMERGENCY_ONLY) &&
++	    governor->manage)
+ 		governor->manage(tz);
+ 
+ 	thermal_debug_update_trip_stats(tz);
+diff --git a/include/linux/sched/cpufreq.h b/include/linux/sched/cpufreq.h
+index bdd31ab..5da789a 100644
+--- a/include/linux/sched/cpufreq.h
++++ b/include/linux/sched/cpufreq.h
+@@ -31,7 +31,12 @@ static inline unsigned long map_util_freq(unsigned long util,
+ 
+ static inline unsigned long map_util_perf(unsigned long util)
+ {
++	/* Reach the top OPP sooner in the opt-in latency-first profile. */
++#ifdef CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE
++	return util + (util >> 1);
++#else
+ 	return util + (util >> 2);
++#endif
+ }
+ #endif /* CONFIG_CPU_FREQ */
+ 
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index df8200c..0c06db0 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -8,7 +8,12 @@
+ 
+ #include <trace/hooks/sched.h>
+ 
++#ifdef CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE
++#define IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 4)
++#define ANDROID_PERF_RATE_LIMIT_US	500U
++#else
+ #define IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
++#endif
+ 
+ struct sugov_tunables {
+ 	struct gov_attr_set	attr_set;
+@@ -787,6 +792,10 @@ static int sugov_init(struct cpufreq_policy *policy)
+ 	}
+ 
+ 	tunables->rate_limit_us = cpufreq_policy_transition_delay_us(policy);
++#ifdef CONFIG_ANDROID_AGGRESSIVE_PERFORMANCE
++	tunables->rate_limit_us = min(tunables->rate_limit_us,
++				      ANDROID_PERF_RATE_LIMIT_US);
++#endif
+ 
+ 	policy->governor_data = sg_policy;
+ 	sg_policy->tunables = tunables;
+-- 
+2.51.1
+
